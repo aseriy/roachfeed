@@ -2,8 +2,10 @@ defmodule RoachFeed.Tests do
 	use RoachFeed.Tests.Base
 	alias RoachFeed.Tests.FakeConsumer
 
+	@db_defaults [hostname: "localhost", port: 26257, username: "root", database: "roachfeed_test"]
+
 	setup_all do
-		{:ok, _} = Postgrex.start_link(name: :testdb, hostname: "localhost", port: 26257, username: "root", database: "roachfeed_test")
+		{:ok, _} = Postgrex.start_link([name: :testdb] ++ @db_defaults)
 		query!("drop table if exists table_a")
 		query!("drop table if exists table_b")
 		query!("create table table_a (id int primary key, value text)")
@@ -48,12 +50,8 @@ defmodule RoachFeed.Tests do
 
 	defp start_consumer(opts \\ []) do
 		default = [
-			test: self(),  # used by our fake consumer in setup to forward messages to this pid (our test)
-			port: 26257,
-			username: "root",
-			hostname: "localhost",
-			database: "roachfeed_test"
-		]
+			test: self()  # used by our fake consumer in setup to forward messages to this pid (our test)
+		] ++ @db_defaults
 		{:ok, pid} = FakeConsumer.start_link(Keyword.merge(default, opts))
 		pid
 	end
