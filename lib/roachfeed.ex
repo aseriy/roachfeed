@@ -119,6 +119,9 @@ defmodule RoachFeed do
 			# server properties, ignore
 			defp process_message(?S, _msg, state), do: {:ok, state}
 
+			# backend key data, ignore
+			defp process_message(?K, _msg, state), do: {:ok, state}
+
 			# reply to the bind from the experimental changefeed query
 			# can't process this synchronously, because cockroachdb doesn't send the
 			# reply until there's data in the changefeed
@@ -279,6 +282,14 @@ defmodule RoachFeed do
 		send_password(socket, Base.encode16(hash, case: :lower))
 	end
 
+	# asking for SASL authentication (SCRAM-SHA-256)
+	defp finalize_authentication(socket, {?R, <<0, 0, 0, 10, mechanisms::binary>>}, opts) do
+		case Enum.member?(:binary.split(mechanisms, <<0>>, [:global]), "SCRAM-SHA-256") do
+			true -> scram_sha_256(socket, opts)
+			false -> {:error, RoachFeed.Error.driver("unsupported authentication type", mechanisms)}
+		end
+	end
+
 	defp finalize_authentication(_socket, {?R, message}, _opts) do
 		{:error, RoachFeed.Error.driver("unsupported authentication type", message)}
 	end
@@ -296,6 +307,37 @@ defmodule RoachFeed do
 		case send_recv_message(socket, message) do
 			{?R, <<0, 0, 0, 0>>} -> :ok
 			err -> err
+		end
+	end
+
+	defp scram_sha_256(socket, opts) do
+		password = Keyword.get(opts, :password, "")
+		client_nonce = Base.encode64(:crypto.strong_rand_bytes(18))
+		client_first_bare = "n=,r=" <> client_nonce
+		client_first = "n,," <> client_first_bare
+		initial = "SCRAM-SHA-256" <> <<0, byte_size(client_first)::big-32, client_first::binary>>
+
+		with {?R, <<0, 0, 0, 11, server_first::binary>>} <- send_recv_message(socket, <<?p, (byte_size(initial)+4)::big-32, initial::binary>>),
+		     attrs = (for <<k, ?=, v::binary>> <- :binary.split(server_first, ",", [:global]), into: %{}, do: {k, v}),
+		     server_nonce = attrs[?r],
+		     true <- String.starts_with?(server_nonce, client_nonce) || {:error, RoachFeed.Error.driver("SCRAM nonce mismatch", server_nonce)},
+		     salted = :crypto.pbkdf2_hmac(:sha256, password, Base.decode64!(attrs[?s]), String.to_integer(attrs[?i]), 32),
+		     client_key = :crypto.mac(:hmac, :sha256, salted, "Client Key"),
+		     client_final_bare = "c=biws,r=" <> server_nonce,
+		     auth_message = client_first_bare <> "," <> server_first <> "," <> client_final_bare,
+		     client_signature = :crypto.mac(:hmac, :sha256, :crypto.hash(:sha256, client_key), auth_message),
+		     proof = Base.encode64(:crypto.exor(client_key, client_signature)),
+		     client_final = client_final_bare <> ",p=" <> proof,
+		     {?R, <<0, 0, 0, 12, "v=", server_sig::binary>>} <- send_recv_message(socket, <<?p, (byte_size(client_final)+4)::big-32, client_final::binary>>),
+		     server_key = :crypto.mac(:hmac, :sha256, salted, "Server Key"),
+		     true <- server_sig == Base.encode64(:crypto.mac(:hmac, :sha256, server_key, auth_message)) || {:error, RoachFeed.Error.driver("SCRAM server signature mismatch", server_sig)},
+		     {?R, <<0, 0, 0, 0>>} <- recv_message(socket)
+		do
+			:ok
+		else
+			{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
+			{:error, _} = err -> err
+			invalid -> {:error, RoachFeed.Error.driver("unexpected SCRAM response", invalid)}
 		end
 	end
 
