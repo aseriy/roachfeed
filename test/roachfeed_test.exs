@@ -5,7 +5,7 @@ defmodule RoachFeed.Tests do
 	@db_defaults [hostname: "localhost", port: 26257, username: "root", database: "roachfeed_test"]
 
 	setup_all do
-		{:ok, _} = Postgrex.start_link([name: :testdb] ++ @db_defaults)
+		{:ok, _} = Postgrex.start_link([name: :testdb] ++ db_config())
 		query!("drop table if exists table_a")
 		query!("drop table if exists table_b")
 		query!("create table table_a (id int primary key, value text)")
@@ -48,10 +48,29 @@ defmodule RoachFeed.Tests do
 		Postgrex.query!(:testdb, sql, args)
 	end
 
+	defp db_config do
+		case System.get_env("CRDB_DSN") do
+			nil -> @db_defaults
+			dsn -> parse_dsn(dsn)
+		end
+	end
+
+	defp parse_dsn(dsn) do
+		uri = URI.parse(dsn)
+		[username, password] = String.split(uri.userinfo, ":", parts: 2)
+		[
+			hostname: uri.host,
+			port: uri.port || 26257,
+			username: URI.decode(username),
+			password: URI.decode(password),
+			database: String.trim_leading(uri.path, "/")
+		]
+	end
+
 	defp start_consumer(opts \\ []) do
 		default = [
 			test: self()  # used by our fake consumer in setup to forward messages to this pid (our test)
-		] ++ @db_defaults
+		] ++ db_config()
 		{:ok, pid} = FakeConsumer.start_link(Keyword.merge(default, opts))
 		pid
 	end
