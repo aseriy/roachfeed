@@ -136,7 +136,7 @@ defmodule RoachFeed do
 				socket = Process.get(:socket)
 				{state, config} = query(state)
 
-				sql = ["experimental changefeed for ", config |> Keyword.fetch!(:for) |> List.wrap() |> Enum.join(", ")]
+				sql = ["create changefeed for table ", config |> Keyword.fetch!(:for) |> List.wrap() |> Enum.join(", ")]
 				{sql, values} = case config[:with] do
 					nil -> {sql, []}
 					w ->
