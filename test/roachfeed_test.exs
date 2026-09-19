@@ -10,7 +10,7 @@ defmodule RoachFeed.Tests do
 		query!("drop table if exists table_b")
 		query!("create table table_a (id int primary key, value text)")
 		query!("create table table_b (id text primary key, value int)")
-		query!("set cluster setting kv.rangefeed.enabled = true")
+		# query!("set cluster setting kv.rangefeed.enabled = true")
 		:ok
 	end
 
@@ -82,7 +82,7 @@ defmodule RoachFeed.Tests do
 					server_name_indication: String.to_charlist(config[:hostname]),
 					customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
 				]
-				Keyword.drop(config, [:sslmode, :cacertfile]) ++ [ssl: true, ssl_opts: ssl_opts]
+				Keyword.drop(config, [:sslmode, :cacertfile]) ++ [ssl: ssl_opts]
 			_ ->
 				config
 		end

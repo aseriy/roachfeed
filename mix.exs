@@ -30,7 +30,7 @@ defmodule RoachFeed.MixProject do
   defp deps do
     [
       {:jason, "~>1.2.2", only: :test},
-      {:postgrex, "~>0.15.6", only: :test},
+      {:postgrex, "~> 0.21.0", only: :test},
       {:ex_doc, "~> 0.22.6", only: :dev, runtime: false}
     ]
   end
