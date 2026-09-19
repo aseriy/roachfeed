@@ -56,35 +56,44 @@ defmodule RoachFeed do
 
 				with {:ok, socket} <- :gen_tcp.connect(host, port, [packet: :raw, mode: :binary, active: false], @timeout),
 				     :ok <- :inet.setopts(socket, send_timeout: @timeout),
+				     {:ok, socket} <- RoachFeed.maybe_ssl(socket, host, opts, @timeout),
 				     :ok <- RoachFeed.authenticate(socket, opts),
-				     :ok <- :inet.setopts(socket, active: :once)
+				     :ok <- RoachFeed.sock_setopts(socket, active: :once)
 				do
 					{:ok, socket}
 				end
 			end
 
-			def handle_info({:tcp, socket, data}, state) do
-				case process_data(socket, data, state) do
-					{:ok, state} ->
-						:inet.setopts(socket, active: :once)
-						{:noreply, state}
-					{:error, err} ->
-						# not sure this is right
-						:gen_tcp.close(socket)
-						{:stop, err, state}
-				end
-			end
+			def handle_info({:tcp, _socket, data}, state), do: handle_socket_data(data, state)
+			def handle_info({:ssl, _socket, data}, state), do: handle_socket_data(data, state)
 
 			def handle_info({:tcp_closed, _socket}, state) do
 				{:stop, :closed, state}
 			end
 
+			def handle_info({:ssl_closed, _socket}, state) do
+				{:stop, :closed, state}
+			end
+
+			defp handle_socket_data(data, state) do
+				socket = Process.get(:socket)
+				case process_data(socket, data, state) do
+					{:ok, state} ->
+						RoachFeed.sock_setopts(socket, active: :once)
+						{:noreply, state}
+					{:error, err} ->
+						# not sure this is right
+						RoachFeed.sock_close(socket)
+						{:stop, err, state}
+				end
+			end
+
 			defp process_data(socket, <<>>, state), do: {:ok, state}
 
 			defp process_data(socket, data, state) when byte_size(data) < 5 do
-				with {:ok, more} <- :gen_tcp.recv(socket, 5 - byte_size(data), @timeout),
+				with {:ok, more} <- RoachFeed.sock_recv(socket, 5 - byte_size(data), @timeout),
 				     <<type, length::big-32>> = data <> more,  # both are very short
-				     {:ok, payload} <- :gen_tcp.recv(socket, length-4, @timeout)
+				     {:ok, payload} <- RoachFeed.sock_recv(socket, length-4, @timeout)
 				do
 					process_message(type, payload, state)
 				end
@@ -92,7 +101,7 @@ defmodule RoachFeed do
 
 			defp process_data(socket, <<type, length::big-32, rest::binary>>, state) when byte_size(rest) < (length-4) do
 				missing = length - 4 - byte_size(rest)
-				with {:ok, payload} <- :gen_tcp.recv(socket, missing, @timeout) do
+				with {:ok, payload} <- RoachFeed.sock_recv(socket, missing, @timeout) do
 					payload = :erlang.iolist_to_binary([rest, payload])
 					process_message(type, payload, state)
 				end
@@ -166,7 +175,7 @@ defmodule RoachFeed do
 				     {?t, _} <- RoachFeed.recv_message(socket), # parameter info
 				     {?T, _} <- RoachFeed.recv_message(socket), # column info
 				     {?Z, _} <- RoachFeed.recv_message(socket), # wait until server is ready
-				     :ok <- :gen_tcp.send(socket, bind_execute_close_sync)
+				     :ok <- RoachFeed.sock_send(socket, bind_execute_close_sync)
 				do
 					{:ok, state}
 				else
@@ -201,11 +210,55 @@ defmodule RoachFeed do
 	end
 
 	@doc false
+	def maybe_ssl(socket, host, opts, timeout) do
+		case Keyword.get(opts, :sslmode) do
+			nil -> {:ok, {:gen_tcp, socket}}
+			"disable" -> {:ok, {:gen_tcp, socket}}
+			"verify-full" -> ssl_connect(socket, host, opts, timeout)
+			other -> {:error, RoachFeed.Error.driver("unsupported sslmode", other)}
+		end
+	end
+
+	defp ssl_connect(socket, host, opts, timeout) do
+		tls_opts = [
+			verify: :verify_peer,
+			cacertfile: Keyword.fetch!(opts, :cacertfile),
+			server_name_indication: host,
+			customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
+		]
+		with :ok <- :gen_tcp.send(socket, <<8::big-32, 1234::big-16, 5679::big-16>>),
+		     {:ok, "S"} <- :gen_tcp.recv(socket, 1, timeout),
+		     {:ok, ssl_socket} <- :ssl.connect(socket, tls_opts, timeout)
+		do
+			{:ok, {:ssl, ssl_socket}}
+		else
+			{:ok, "N"} -> {:error, RoachFeed.Error.driver("server refused TLS", nil)}
+			err -> err
+		end
+	end
+
+	@doc false
+	def sock_send({:gen_tcp, socket}, data), do: :gen_tcp.send(socket, data)
+	def sock_send({:ssl, socket}, data), do: :ssl.send(socket, data)
+
+	@doc false
+	def sock_recv({:gen_tcp, socket}, n, timeout), do: :gen_tcp.recv(socket, n, timeout)
+	def sock_recv({:ssl, socket}, n, timeout), do: :ssl.recv(socket, n, timeout)
+
+	@doc false
+	def sock_setopts({:gen_tcp, socket}, opts), do: :inet.setopts(socket, opts)
+	def sock_setopts({:ssl, socket}, opts), do: :ssl.setopts(socket, opts)
+
+	@doc false
+	def sock_close({:gen_tcp, socket}), do: :gen_tcp.close(socket)
+	def sock_close({:ssl, socket}), do: :ssl.close(socket)
+
+	@doc false
 	def authenticate(socket, opts) do
 		username = Keyword.get(opts, :username, System.get_env("USER"))
 		database = Keyword.get(opts, :database, username)
 		payload = <<0, 3, 0, 0, "user", 0, username::binary, 0, "database", 0, database::binary, 0, 0>>
-		with :ok <- :gen_tcp.send(socket, <<(byte_size(payload)+4)::big-32, payload::binary>>)
+		with :ok <- sock_send(socket, <<(byte_size(payload)+4)::big-32, payload::binary>>)
 		do
 			finalize_authentication(socket, recv_message(socket), opts)
 		end
@@ -248,7 +301,7 @@ defmodule RoachFeed do
 
 	@doc false
 	def send_recv_message(socket, message) do
-		case :gen_tcp.send(socket, message) do
+		case sock_send(socket, message) do
 			:ok -> recv_message(socket)
 			err -> err
 		end
@@ -271,7 +324,7 @@ defmodule RoachFeed do
 	end
 
 	defp recv_n(socket, n, timeout) do
-		case :gen_tcp.recv(socket, n, timeout) do
+		case sock_recv(socket, n, timeout) do
 			{:ok, data} -> {:ok, data}
 			err -> err
 		end

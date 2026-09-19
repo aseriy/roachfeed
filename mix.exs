@@ -23,7 +23,7 @@ defmodule RoachFeed.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :ssl]
     ]
   end
 
