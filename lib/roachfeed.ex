@@ -136,55 +136,80 @@ defmodule RoachFeed do
 				socket = Process.get(:socket)
 				{state, config} = query(state)
 
-				sql = ["create changefeed for table ", config |> Keyword.fetch!(:for) |> List.wrap() |> Enum.join(", ")]
-				{sql, values} = case config[:with] do
-					nil -> {sql, []}
-					w ->
-						{w, values, _} = Enum.reduce(w, {[], [], 1}, fn
+				cond do
+					config[:for] == nil and config[:table] == nil ->
+						{:error, RoachFeed.Error.driver("changefeed config requires one of :for or :table", nil)}
+
+					config[:for] != nil and config[:table] != nil ->
+						{:error, RoachFeed.Error.driver("changefeed config cannot have both :for and :table", nil)}
+
+					true ->
+						with_opts = case config[:table] do
+							nil -> config[:with]
+							_ -> Keyword.put_new(config[:with] || [], :envelope, "wrapped")
+						end
+
+						{w, values, _} = Enum.reduce(with_opts || [], {[], [], 1}, fn
 							{:cursor, nil}, acc -> acc  # crdb doesn't support a nil cursor, just don't add the option
 							{key, value}, {w, values, index} -> {[", #{key} = $#{index}", w], [value | values], index + 1}
 						end)
+						values = Enum.reverse(values)
+						w = :erlang.iolist_to_binary(w)
 
-						sql = case :erlang.iolist_to_binary(w) do
-							"" -> sql
-							<<", ", w::binary>> -> [sql, " with ", w]
+						sql = case config[:table] do
+							nil ->
+								sql = ["CREATE CHANGEFEED FOR TABLE ", config |> Keyword.fetch!(:for) |> List.wrap() |> Enum.join(", ")]
+								case w do
+									"" -> sql
+									<<", ", w::binary>> -> [sql, " WITH ", w]
+								end
+							table ->
+								<<", ", w::binary>> = w
+								columns = case config[:columns] do
+									c when c in [nil, []] -> "*"
+									c -> Enum.join(c, ", ")
+								end
+								where = case config[:where] do
+									p when p in [nil, "", []] -> ""
+									p -> " WHERE #{p}"
+								end
+								["CREATE CHANGEFEED WITH ", w, " AS SELECT ", columns, " FROM ", table, where]
 						end
-						{sql, Enum.reverse(values)}
-				end
 
-				sql = :erlang.iolist_to_binary(sql)
-				parse_describe_sync = [
-					RoachFeed.build_message(?P, <<0, sql::binary, 0, 0, 0>>),
-					<<?D, 0, 0, 0, 6, ?S, 0>>,
-					<<?S, 0, 0, 0, 4>>
-				]
+						sql = :erlang.iolist_to_binary(sql)
+						parse_describe_sync = [
+							RoachFeed.build_message(?P, <<0, sql::binary, 0, 0, 0>>),
+							<<?D, 0, 0, 0, 6, ?S, 0>>,
+							<<?S, 0, 0, 0, 4>>
+						]
 
-				{args_count, args_length, args} = Enum.reduce(values, {0, 0, []}, fn
-					nil, {count, length, acc} -> {count + 1, length + 4, [<<255, 255, 255, 255>> | acc]}
-					value, {count, length, acc} ->
-						value = to_string(value)
-						acc = [acc, <<byte_size(value)::big-32, value::binary>>]
-						{count + 1, length + byte_size(value) + 4, acc}
-				end)
+						{args_count, args_length, args} = Enum.reduce(values, {0, 0, []}, fn
+							nil, {count, length, acc} -> {count + 1, length + 4, [<<255, 255, 255, 255>> | acc]}
+							value, {count, length, acc} ->
+								value = to_string(value)
+								acc = [acc, <<byte_size(value)::big-32, value::binary>>]
+								{count + 1, length + byte_size(value) + 4, acc}
+						end)
 
-				bind_execute_close_sync = [
-					[?B, 0, 0, 0, 14 + args_length, 0, 0, 0, 0, <<args_count::big-16>>, args, 0, 1, 0, 1],
-					<<?E, 0, 0, 0, 9, 0, 0, 0, 0, 0>>,
-					<<?C, 0, 0, 0, 5, ?S>>,
-					<<?S, 0, 0, 0, 4>>
-				]
+						bind_execute_close_sync = [
+							[?B, 0, 0, 0, 14 + args_length, 0, 0, 0, 0, <<args_count::big-16>>, args, 0, 1, 0, 1],
+							<<?E, 0, 0, 0, 9, 0, 0, 0, 0, 0>>,
+							<<?C, 0, 0, 0, 5, ?S>>,
+							<<?S, 0, 0, 0, 4>>
+						]
 
-				with {?1, nil} <- RoachFeed.send_recv_message(socket, parse_describe_sync),
-				     {?t, _} <- RoachFeed.recv_message(socket), # parameter info
-				     {?T, _} <- RoachFeed.recv_message(socket), # column info
-				     {?Z, _} <- RoachFeed.recv_message(socket), # wait until server is ready
-				     :ok <- RoachFeed.sock_send(socket, bind_execute_close_sync)
-				do
-					{:ok, state}
-				else
-					{:error, _} = err -> err
-					{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
-					invalid -> {:error, RoachFeed.Error.driver("unexpected reply to parse+describe+sync", invalid)}
+						with {?1, nil} <- RoachFeed.send_recv_message(socket, parse_describe_sync),
+						     {?t, _} <- RoachFeed.recv_message(socket), # parameter info
+						     {?T, _} <- RoachFeed.recv_message(socket), # column info
+						     {?Z, _} <- RoachFeed.recv_message(socket), # wait until server is ready
+						     :ok <- RoachFeed.sock_send(socket, bind_execute_close_sync)
+						do
+							{:ok, state}
+						else
+							{:error, _} = err -> err
+							{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
+							invalid -> {:error, RoachFeed.Error.driver("unexpected reply to parse+describe+sync", invalid)}
+						end
 				end
 			end
 

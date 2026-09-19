@@ -3,19 +3,19 @@ defmodule RoachFeed.Tests do
 	alias RoachFeed.Tests.FakeConsumer
 
 	setup_all do
-		query!("drop table if exists table_a")
-		query!("drop table if exists table_b")
-		query!("create table table_a (id int primary key, value text)")
-		query!("create table table_b (id text primary key, value int)")
+		query!("DROP TABLE IF EXISTS table_a")
+		query!("DROP TABLE IF EXISTS table_b")
+		query!("CREATE TABLE table_a (id INT PRIMARY KEY, value TEXT)")
+		query!("CREATE TABLE table_b (id TEXT PRIMARY KEY, value INT)")
 		on_exit(fn ->
-			query!("drop table if exists table_a")
-			query!("drop table if exists table_b")
+			query!("DROP TABLE IF EXISTS table_a")
+			query!("DROP TABLE IF EXISTS table_b")
 		end)
 		:ok
 	end
 
 	test "this is hard to test, let's just do what we can" do
-		query!("insert into table_a (id, value) values ($1, $2), ($3, $4)", [1, "over", 2, "9000!"])
+		query!("INSERT INTO table_a (id, value) VALUES ($1, $2), ($3, $4)", [1, "over", 2, "9000!"])
 		pid = start_consumer()
 		change = forwarded(:change)
 		assert change.key == [1]
@@ -29,7 +29,7 @@ defmodule RoachFeed.Tests do
 
 		%{resolved: r} = forwarded(:resolved)
 
-		query!("insert into table_a (id, value) values ($1, $2)", [3, "spice"])
+		query!("INSERT INTO table_a (id, value) VALUES ($1, $2)", [3, "spice"])
 		change = forwarded(:change)
 		assert change.key == [3]
 		assert change.table == "table_a"
