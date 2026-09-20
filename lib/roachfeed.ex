@@ -146,7 +146,7 @@ defmodule RoachFeed do
 					true ->
 						with_opts = case config[:table] do
 							nil -> config[:with]
-							_ -> Keyword.put_new(config[:with] || [], :envelope, "wrapped")
+							_ -> [envelope: "wrapped", resolved: config[:resolved] || "10s", cursor: config[:after]]
 						end
 
 						{w, values, _} = Enum.reduce(with_opts || [], {[], [], 1}, fn
