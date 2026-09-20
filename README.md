@@ -102,6 +102,14 @@ CREATE CHANGEFEED WITH envelope = 'wrapped', resolved = '10s'[, cursor = <after>
 AS SELECT <columns|*> FROM <table>[ WHERE <predicate>]
 ```
 
+## TODO
+
+- Silent connection close: the library detects an orderly server close, but a
+  connection that dies without notice (network partition, idle-connection drop
+  by a middlebox) leaves the consumer waiting forever. Needs a liveness
+  mechanism - TCP keepalive on the socket and/or a watchdog on expected
+  `resolved` watermarks.
+
 ## License
 
 [ISC](LICENSE) Copyright (c) 2020, Karl Seguin
