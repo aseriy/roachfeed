@@ -68,6 +68,40 @@ typically connection string value:
 {MyModule, [any_opts_you_want_passed_to_setup/1]}
 ```
 
+## Single-table changefeed (CDC query)
+
+An alternative config shape for `query/1`. It attaches the changefeed to
+exactly one table and supports column projection and row filtering:
+
+```elixir
+change_feed = [
+  table: "messages",         # required - exactly one table
+  columns: ["id", "body"],   # optional - omitted/[] selects all columns
+  where: "author = 'alex'",  # optional - omitted/"" means no WHERE clause
+  resolved: "10s",           # optional - defaults to "10s"
+  after: timestamp           # optional - omitted/nil does a full catch-up (initial scan)
+]
+```
+
+Semantics:
+
+- Mutually exclusive with `for`: a config contains exactly one of `table` or `for`.
+- No `with` key in this shape; nothing from the caller maps to the SQL `WITH` clause.
+- The envelope is fixed at `wrapped`; messages always arrive as `{"after": {...}}`.
+- `resolved` defaults to `"10s"`, so every feed emits watermarks.
+- `after` is the restart mechanism: pass the timestamp of the last received
+  message and the feed resumes strictly past it (CockroachDB's `cursor` option).
+  When omitted, the feed does an initial scan of the table, then streams live changes.
+- `table`, `columns` and `where` are spliced into the SQL verbatim; the server
+  validates them.
+
+The generated statement:
+
+```sql
+CREATE CHANGEFEED WITH envelope = 'wrapped', resolved = '10s'[, cursor = <after>]
+AS SELECT <columns|*> FROM <table>[ WHERE <predicate>]
+```
+
 ## License
 
 [ISC](LICENSE) Copyright (c) 2020, Karl Seguin
