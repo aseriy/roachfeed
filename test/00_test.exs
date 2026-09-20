@@ -16,6 +16,7 @@ defmodule RoachFeed.Tests do
 
 	test "this is hard to test, let's just do what we can" do
 		query!("INSERT INTO table_a (id, value) VALUES ($1, $2), ($3, $4)", [1, "over", 2, "9000!"])
+		query!("INSERT INTO table_b (id, value) VALUES ($1, $2), ($3, $4)", ["over", 1, "9000!", 2])
 		pid = start_consumer()
 		change = forwarded(:change)
 		assert change.key == [1]
@@ -30,6 +31,7 @@ defmodule RoachFeed.Tests do
 		%{resolved: r} = forwarded(:resolved)
 
 		query!("INSERT INTO table_a (id, value) VALUES ($1, $2)", [3, "spice"])
+		query!("INSERT INTO table_b (id, value) VALUES ($1, $2)", ["spice", 1])
 		change = forwarded(:change)
 		assert change.key == [3]
 		assert change.table == "table_a"
