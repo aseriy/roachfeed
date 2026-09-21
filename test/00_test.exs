@@ -45,11 +45,47 @@ defmodule RoachFeed.Tests do
 	end
 
 
+	test "single table changefeed" do
+		query!("INSERT INTO table_b (id, value) VALUES ($1, $2), ($3, $4)", ["over", 1, "9000!", 2])
+		pid = start_consumer(change_feed: [table: "table_b", resolved: "1s"])
+		change = forwarded(:change)
+		assert change.key == ["9000!"]
+		assert change.table == "table_b"
+		%{after: row, mvcc_timestamp: _ts1} = change.data
+		assert row == %{id: "9000!", value: 2}
+
+		change = forwarded(:change)
+		assert change.key == ["over"]
+		assert change.table == "table_b"
+		%{after: row, mvcc_timestamp: ts2} = change.data
+		assert row == %{id: "over", value: 1}
+
+		query!("INSERT INTO table_b (id, value) VALUES ($1, $2)", ["spice", 1])
+		change = forwarded(:change)
+		assert change.key == ["spice"]
+		assert change.table == "table_b"
+		%{after: row, mvcc_timestamp: ts3} = change.data
+		assert row == %{id: "spice", value: 1}
+
+		GenServer.stop(pid)
+
+		pid = start_consumer(change_feed: [table: "table_b", resolved: "1s", after: ts2])
+		change = forwarded(:change)
+		assert change.key == ["spice"]
+		assert change.table == "table_b"
+		GenServer.stop(pid)
+
+		start_consumer(change_feed: [table: "table_b", resolved: "1s", after: ts3])
+		assert forwarded(:change) == nil
+end
+
+
+
 	defp query!(sql, args \\ []) do
 		Postgrex.query!(:testdb, sql, args)
 	end
 
-	defp start_consumer(opts \\ []) do
+	defp start_consumer(opts) do
 		default = [
 			test: self()  # used by our fake consumer in setup to forward messages to this pid (our test)
 		] ++ db_config()
