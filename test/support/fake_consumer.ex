@@ -2,19 +2,12 @@ defmodule RoachFeed.Tests.FakeConsumer do
 	use RoachFeed
 
 	defp setup(opts) do
-		state = {1, Keyword.fetch!(opts, :test), opts}
+		state = {1, Keyword.fetch!(opts, :test), Keyword.fetch!(opts, :change_feed)}
 		{state, opts}
 	end
 
-	defp query({count, pid, opts} = _state) do
-		change_feed = [
-			for: "table_a",
-			with: [
-				resolved: "1s",
-				cursor: opts[:resolved]
-			]
-		]
-		state = {count, pid} # we don't need opts anymore
+	defp query({count, pid, change_feed} = _state) do
+		state = {count, pid} # we don't need the change_feed anymore
 		{state, change_feed}
 	end
 

@@ -146,11 +146,12 @@ defmodule RoachFeed do
 					true ->
 						with_opts = case config[:table] do
 							nil -> config[:with]
-							_ -> [envelope: "wrapped", resolved: config[:resolved] || "10s", cursor: config[:after]]
+							_ -> [envelope: "wrapped", resolved: config[:resolved] || "10s", cursor: config[:after], mvcc_timestamp: true]
 						end
 
 						{w, values, _} = Enum.reduce(with_opts || [], {[], [], 1}, fn
 							{:cursor, nil}, acc -> acc  # crdb doesn't support a nil cursor, just don't add the option
+							{key, true}, {w, values, index} -> {[", #{key}", w], values, index}
 							{key, value}, {w, values, index} -> {[", #{key} = $#{index}", w], [value | values], index + 1}
 						end)
 						values = Enum.reverse(values)
