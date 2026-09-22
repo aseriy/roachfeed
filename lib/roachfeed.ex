@@ -166,6 +166,7 @@ defmodule RoachFeed do
 								end
 							table ->
 								<<", ", w::binary>> = w
+								schema = config[:schema] || "public"
 								columns = case config[:columns] do
 									c when c in [nil, []] -> "*"
 									c -> Enum.join(c, ", ")
@@ -174,7 +175,7 @@ defmodule RoachFeed do
 									p when p in [nil, "", []] -> ""
 									p -> " WHERE #{p}"
 								end
-								["CREATE CHANGEFEED WITH ", w, " AS SELECT ", columns, " FROM ", table, where]
+								["CREATE CHANGEFEED WITH ", w, " AS SELECT ", columns, " FROM ", schema, ".", table, where]
 						end
 
 						sql = :erlang.iolist_to_binary(sql)

@@ -76,6 +76,7 @@ exactly one table and supports column projection and row filtering:
 ```elixir
 change_feed = [
   table: "messages",         # required - exactly one table
+  schema: "public",          # optional - table's schema, defaults to "public"
   columns: ["id", "body"],   # optional - omitted/[] selects all columns
   where: "author = 'alex'",  # optional - omitted/"" means no WHERE clause
   resolved: "10s",           # optional - defaults to "10s"
