@@ -9,7 +9,7 @@ defmodule RoachFeed.MixProject do
       app: :roachfeed,
       name: "RoachFeed",
       deps: deps(),
-      elixir: "~> 1.10",
+      elixir: "~> 1.14",
       version: @version,
       elixirc_paths: paths(Mix.env()),
       description: "CockroachDB ChangeFeed Consumer",
@@ -29,9 +29,9 @@ defmodule RoachFeed.MixProject do
 
   defp deps do
     [
-      {:jason, "~>1.2.2", only: :test},
+      {:jason, "~> 1.4.5", only: :test},
       {:postgrex, "~> 0.21.0", only: :test},
-      {:ex_doc, "~> 0.22.6", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.36.1", only: :dev, runtime: false}
     ]
   end
 
