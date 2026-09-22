@@ -31,10 +31,10 @@ defmodule RoachFeed.Tests.Messages do
 		rows = @messages |> Enum.with_index() |> Map.new(fn {row, position} -> {row["id"], {position, row}} end)
 		feeder = start_feeder(@messages, @feed_interval)
 
-		{changes1, cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id"]], rows, [:id])
-		{changes2, cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "body"], after: cursor], rows, [:body, :id])
-		{changes3, cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "body", "created_at"], after: cursor], rows, [:body, :created_at, :id])
-		{changes4, _cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "body"], after: cursor], rows, [:body, :id])
+		{changes1, cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "event_op() AS op", "cdc_prev IS NULL AS is_new"]], rows, [:id, :is_new, :op])
+		{changes2, cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "body", "event_op() AS op", "cdc_prev IS NULL AS is_new"], after: cursor], rows, [:body, :id, :is_new, :op])
+		{changes3, cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "body", "created_at", "event_op() AS op", "cdc_prev IS NULL AS is_new"], after: cursor], rows, [:body, :created_at, :id, :is_new, :op])
+		{changes4, _cursor} = run_phase([table: "table_msg", resolved: "1s", columns: ["id", "body", "event_op() AS op", "cdc_prev IS NULL AS is_new"], after: cursor], rows, [:body, :id, :is_new, :op])
 
 		Process.unlink(feeder)
 		Process.exit(feeder, :kill)
@@ -48,53 +48,52 @@ defmodule RoachFeed.Tests.Messages do
 	end
 
 	defp run_phase(change_feed, rows, expected_keys) do
+		IO.puts("\n[phase] columns=#{inspect(change_feed[:columns])} after=#{inspect(change_feed[:after])}")
 		pid = start_consumer(change_feed: change_feed)
 		deadline = System.monotonic_time(:millisecond) + @phase_time
 		changes = collect_changes(deadline, [])
 		GenServer.stop(pid)
+		IO.puts("[phase] collected=#{length(changes)} cursor=#{inspect(last_cursor(changes))}")
 		assert changes != []
 		for change <- changes do
 			assert change.table == "table_msg"
-			row_after = Map.fetch!(change.data, :after)
-			row_before = Map.fetch!(change.data, :before)
+			refute Map.has_key?(change.data, :after)
+			refute Map.has_key?(change.data, :before)
+			fields = Map.drop(change.data, [:__crdb__])
 			cond do
-				row_after == nil ->
-					{_position, row} = Map.fetch!(rows, row_before.id)
-					assert change.key == [row_before.id]
-					assert row_before.body == row["body"]
+				fields[:op] == "delete" ->
+					assert [_id] = change.key
 
-				row_before == nil ->
-					assert Enum.sort(Map.keys(row_after)) == expected_keys
-					assert change.key == [row_after.id]
-					{_position, row} = Map.fetch!(rows, row_after.id)
-					if Map.has_key?(row_after, :body) do
-						assert row_after.body == row["body"]
+				fields.is_new ->
+					assert Enum.sort(Map.keys(fields)) == expected_keys
+					assert change.key == [fields.id]
+					assert fields.op == "insert"
+					{_position, row} = Map.fetch!(rows, fields.id)
+					if Map.has_key?(fields, :body) do
+						assert fields.body == row["body"]
 					end
-					if Map.has_key?(row_after, :created_at) do
-						{:ok, emitted, _} = DateTime.from_iso8601(row_after.created_at)
+					if Map.has_key?(fields, :created_at) do
+						{:ok, emitted, _} = DateTime.from_iso8601(fields.created_at)
 						{:ok, expected, _} = DateTime.from_iso8601(row["created_at"])
 						assert DateTime.compare(emitted, expected) == :eq
 					end
 
 				true ->
-					assert Enum.sort(Map.keys(row_after)) == expected_keys
-					assert change.key == [row_after.id]
-					assert row_before.id == row_after.id
-					{_position, row} = Map.fetch!(rows, row_after.id)
-					if Map.has_key?(row_after, :body) do
-						assert row_after.body == "updated: " <> row["body"]
+					assert Enum.sort(Map.keys(fields)) == expected_keys
+					assert change.key == [fields.id]
+					assert fields.op == "update"
+					{_position, row} = Map.fetch!(rows, fields.id)
+					if Map.has_key?(fields, :body) do
+						assert fields.body == "updated: " <> row["body"]
 					end
-					if row_before[:body] do
-						assert row_before.body == row["body"]
-					end
-					if Map.has_key?(row_after, :created_at) do
-						{:ok, emitted, _} = DateTime.from_iso8601(row_after.created_at)
+					if Map.has_key?(fields, :created_at) do
+						{:ok, emitted, _} = DateTime.from_iso8601(fields.created_at)
 						{:ok, expected, _} = DateTime.from_iso8601(row["created_at"])
 						assert DateTime.compare(emitted, expected) == :eq
 					end
 			end
 		end
-		{changes, changes |> List.last() |> Map.fetch!(:data) |> Map.fetch!(:mvcc_timestamp)}
+		{changes, last_cursor(changes)}
 	end
 
 	defp collect_changes(deadline, acc) do
@@ -103,11 +102,17 @@ defmodule RoachFeed.Tests.Messages do
 			Enum.reverse(acc)
 		else
 			case forwarded(:change, min(remaining, @receive_timeout)) do
-				nil -> collect_changes(deadline, acc)
-				change -> collect_changes(deadline, [change | acc])
+				nil ->
+					collect_changes(deadline, acc)
+				change ->
+					IO.puts("[feed] #{change.table} key=#{inspect(change.key)}\n" <> Jason.encode!(change.data, pretty: true))
+					collect_changes(deadline, [change | acc])
 			end
 		end
 	end
+
+	defp last_cursor([]), do: nil
+	defp last_cursor(changes), do: changes |> List.last() |> Map.fetch!(:data) |> Map.fetch!(:__crdb__) |> Map.fetch!(:mvcc_timestamp)
 
 	defp start_feeder(messages, {min, max}) do
 		spawn_link(fn -> feed(Enum.with_index(messages), messages, min, max) end)

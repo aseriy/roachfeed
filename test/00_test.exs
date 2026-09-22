@@ -51,21 +51,20 @@ defmodule RoachFeed.Tests do
 		change = forwarded(:change)
 		assert change.key == ["9000!"]
 		assert change.table == "table_b"
-		%{after: row, mvcc_timestamp: _ts1} = change.data
-		assert row == %{id: "9000!", value: 2}
+		assert Map.drop(change.data, [:__crdb__]) == %{id: "9000!", value: 2}
 
 		change = forwarded(:change)
 		assert change.key == ["over"]
 		assert change.table == "table_b"
-		%{after: row, mvcc_timestamp: ts2} = change.data
-		assert row == %{id: "over", value: 1}
+		%{__crdb__: %{mvcc_timestamp: ts2}} = change.data
+		assert Map.drop(change.data, [:__crdb__]) == %{id: "over", value: 1}
 
 		query!("INSERT INTO table_b (id, value) VALUES ($1, $2)", ["spice", 1])
 		change = forwarded(:change)
 		assert change.key == ["spice"]
 		assert change.table == "table_b"
-		%{after: row, mvcc_timestamp: ts3} = change.data
-		assert row == %{id: "spice", value: 1}
+		%{__crdb__: %{mvcc_timestamp: ts3}} = change.data
+		assert Map.drop(change.data, [:__crdb__]) == %{id: "spice", value: 1}
 
 		GenServer.stop(pid)
 
@@ -95,7 +94,12 @@ end
 
 	def forwarded(type) do
 		receive do
-			{^type, msg} -> msg
+			{^type, msg} ->
+				case msg do
+					%{data: data} -> IO.puts("[msg] #{msg.table} key=#{inspect(msg.key)}\n" <> Jason.encode!(data, pretty: true))
+					_ -> IO.puts("[msg] " <> Jason.encode!(msg, pretty: true))
+				end
+				msg
 		after
 			2000 -> nil
 		end
