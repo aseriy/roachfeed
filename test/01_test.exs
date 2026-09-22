@@ -56,16 +56,42 @@ defmodule RoachFeed.Tests.Messages do
 		for change <- changes do
 			assert change.table == "table_msg"
 			row_after = Map.fetch!(change.data, :after)
-			assert Enum.sort(Map.keys(row_after)) == expected_keys
-			assert change.key == [row_after.id]
-			{_position, row} = Map.fetch!(rows, row_after.id)
-			if Map.has_key?(row_after, :body) do
-				assert row_after.body == row["body"]
-			end
-			if Map.has_key?(row_after, :created_at) do
-				{:ok, emitted, _} = DateTime.from_iso8601(row_after.created_at)
-				{:ok, expected, _} = DateTime.from_iso8601(row["created_at"])
-				assert DateTime.compare(emitted, expected) == :eq
+			row_before = Map.fetch!(change.data, :before)
+			cond do
+				row_after == nil ->
+					{_position, row} = Map.fetch!(rows, row_before.id)
+					assert change.key == [row_before.id]
+					assert row_before.body == row["body"]
+
+				row_before == nil ->
+					assert Enum.sort(Map.keys(row_after)) == expected_keys
+					assert change.key == [row_after.id]
+					{_position, row} = Map.fetch!(rows, row_after.id)
+					if Map.has_key?(row_after, :body) do
+						assert row_after.body == row["body"]
+					end
+					if Map.has_key?(row_after, :created_at) do
+						{:ok, emitted, _} = DateTime.from_iso8601(row_after.created_at)
+						{:ok, expected, _} = DateTime.from_iso8601(row["created_at"])
+						assert DateTime.compare(emitted, expected) == :eq
+					end
+
+				true ->
+					assert Enum.sort(Map.keys(row_after)) == expected_keys
+					assert change.key == [row_after.id]
+					assert row_before.id == row_after.id
+					{_position, row} = Map.fetch!(rows, row_after.id)
+					if Map.has_key?(row_after, :body) do
+						assert row_after.body == "updated: " <> row["body"]
+					end
+					if row_before[:body] do
+						assert row_before.body == row["body"]
+					end
+					if Map.has_key?(row_after, :created_at) do
+						{:ok, emitted, _} = DateTime.from_iso8601(row_after.created_at)
+						{:ok, expected, _} = DateTime.from_iso8601(row["created_at"])
+						assert DateTime.compare(emitted, expected) == :eq
+					end
 			end
 		end
 		{changes, changes |> List.last() |> Map.fetch!(:data) |> Map.fetch!(:mvcc_timestamp)}
@@ -84,11 +110,11 @@ defmodule RoachFeed.Tests.Messages do
 	end
 
 	defp start_feeder(messages, {min, max}) do
-		spawn_link(fn -> feed(messages, min, max) end)
+		spawn_link(fn -> feed(Enum.with_index(messages), messages, min, max) end)
 	end
 
-	defp feed([], _min, _max), do: :ok
-	defp feed([row | rest], min, max) do
+	defp feed([], _all, _min, _max), do: :ok
+	defp feed([{row, i} | rest], all, min, max) do
 		:timer.sleep(min - 1 + :rand.uniform(max - min + 1))
 		{:ok, created_at, _} = DateTime.from_iso8601(row["created_at"])
 		vector = case row["body_vector"] do
@@ -97,7 +123,15 @@ defmodule RoachFeed.Tests.Messages do
 		end
 		query!("INSERT INTO table_msg (id, body, body_vector, created_at, user_id, author) VALUES ($1, $2, #{vector}, $3, $4, $5)",
 			[uuid(row["id"]), row["body"], created_at, uuid(row["user_id"]), row["author"]])
-		feed(rest, min, max)
+		if rem(i, 10) == 3 and i >= 3 do
+			target = Enum.at(all, i - 3)
+			query!("UPDATE table_msg SET body = 'updated: ' || body WHERE id = $1", [uuid(target["id"])])
+		end
+		if rem(i, 10) == 8 and i >= 8 do
+			target = Enum.at(all, i - 3)
+			query!("DELETE FROM table_msg WHERE id = $1", [uuid(target["id"])])
+		end
+		feed(rest, all, min, max)
 	end
 
 	defp uuid(nil), do: nil
