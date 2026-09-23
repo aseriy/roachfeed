@@ -148,7 +148,7 @@ defmodule RoachFeed do
 
 						with_opts = case config[:table] do
 							nil -> config[:with]
-							_ -> [envelope: "bare", resolved: config[:resolved] || "10s", cursor: config[:after], mvcc_timestamp: true]
+							_ -> [envelope: "wrapped", resolved: config[:resolved] || "10s", cursor: config[:after], mvcc_timestamp: true, diff: true]
 						end
 
 						{w, values, _} = Enum.reduce(with_opts || [], {[], [], 1}, fn
