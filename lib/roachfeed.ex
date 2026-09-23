@@ -144,6 +144,8 @@ defmodule RoachFeed do
 						{:error, RoachFeed.Error.driver("changefeed config cannot have both :for and :table", nil)}
 
 					true ->
+						schema = config[:schema] || "public"
+
 						with_opts = case config[:table] do
 							nil -> config[:with]
 							_ -> [envelope: "bare", resolved: config[:resolved] || "10s", cursor: config[:after], mvcc_timestamp: true]
@@ -166,7 +168,6 @@ defmodule RoachFeed do
 								end
 							table ->
 								<<", ", w::binary>> = w
-								schema = config[:schema] || "public"
 								columns = case config[:columns] do
 									c when c in [nil, []] -> "*"
 									c -> Enum.join(c, ", ")
@@ -200,12 +201,22 @@ defmodule RoachFeed do
 							<<?S, 0, 0, 0, 4>>
 						]
 
-						with {?1, nil} <- RoachFeed.send_recv_message(socket, parse_describe_sync),
+						column_types = case config[:table] do
+							nil -> {:ok, nil}
+							table -> RoachFeed.fetch_column_types(socket, schema, table, config[:columns])
+						end
+
+						with {:ok, column_types} <- column_types,
+						     {?1, nil} <- RoachFeed.send_recv_message(socket, parse_describe_sync),
 						     {?t, _} <- RoachFeed.recv_message(socket), # parameter info
 						     {?T, _} <- RoachFeed.recv_message(socket), # column info
 						     {?Z, _} <- RoachFeed.recv_message(socket), # wait until server is ready
 						     :ok <- RoachFeed.sock_send(socket, bind_execute_close_sync)
 						do
+							if column_types != nil do
+								IO.puts("column types: " <> Enum.map_join(column_types, ", ", fn {name, type} -> "#{name}=#{type}" end))
+								Process.put(:column_types, column_types)
+							end
 							{:ok, state}
 						else
 							{:error, _} = err -> err
@@ -403,6 +414,67 @@ defmodule RoachFeed do
 	def build_message(type, <<payload::binary>>) do
 		# +5 for the length itself + null terminator
 		[type, <<(byte_size(payload)+5)::big-32>>, payload, 0]
+	end
+
+	@doc false
+	def fetch_column_types(socket, schema, table, columns) do
+		filter = case columns do
+			c when c in [nil, []] -> ""
+			c -> [" AND column_name IN (", c |> Enum.map(fn column -> "'#{column}'" end) |> Enum.join(", "), ")"]
+		end
+		sql = :erlang.iolist_to_binary([
+			"SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = '", schema,
+			"' AND table_name = '", table, "'", filter, " ORDER BY ordinal_position"
+		])
+
+		parse_describe_sync = [
+			build_message(?P, <<0, sql::binary, 0, 0, 0>>),
+			<<?D, 0, 0, 0, 6, ?S, 0>>,
+			<<?S, 0, 0, 0, 4>>
+		]
+
+		bind_execute_close_sync = [
+			[?B, 0, 0, 0, 14, 0, 0, 0, 0, <<0::big-16>>, [], 0, 1, 0, 1],
+			<<?E, 0, 0, 0, 9, 0, 0, 0, 0, 0>>,
+			<<?C, 0, 0, 0, 6, ?S, 0>>,
+			<<?S, 0, 0, 0, 4>>
+		]
+
+		with {?1, nil} <- send_recv_message(socket, parse_describe_sync),
+		     {?t, _} <- recv_message(socket), # parameter info
+		     {?T, _} <- recv_message(socket), # column info
+		     {?Z, _} <- recv_message(socket), # wait until server is ready
+		     :ok <- sock_send(socket, bind_execute_close_sync),
+		     {?2, nil} <- recv_message(socket)
+		do
+			recv_column_types(socket, [])
+		else
+			{:error, _} = err -> err
+			{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
+			invalid -> {:error, RoachFeed.Error.driver("unexpected reply to column type query", invalid)}
+		end
+	end
+
+	defp recv_column_types(socket, acc) do
+		case recv_message(socket) do
+			{?D, <<2::big-16, l1::big-32, rest::binary>>} ->
+				<<name::bytes-size(l1), l2::big-32, rest::binary>> = rest
+				<<udt_name::bytes-size(l2)>> = rest
+				recv_column_types(socket, [{name, udt_name} | acc])
+			{?C, _} ->
+				with {?3, nil} <- recv_message(socket),
+				     {?Z, _} <- recv_message(socket)
+				do
+					{:ok, Enum.reverse(acc)}
+				else
+					{:error, _} = err -> err
+					{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
+					invalid -> {:error, RoachFeed.Error.driver("unexpected reply to column type query", invalid)}
+				end
+			{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
+			{:error, _} = err -> err
+			invalid -> {:error, RoachFeed.Error.driver("unexpected reply to column type query", invalid)}
+		end
 	end
 
 end
