@@ -58,12 +58,13 @@ defmodule RoachFeed.Tests.Messages do
 		for change <- changes do
 			assert change.table == "table_msg"
 			cond do
-				change.data.after == nil ->
+				change.data.type == "DELETE" ->
 					assert [_id] = change.key
-					assert change.data.before.id == hd(change.key)
+					assert change.data.old_record.id == hd(change.key)
+					refute Map.has_key?(change.data.old_record, :author)
 
-				change.data.before == nil ->
-					fields = change.data.after
+				change.data.type == "INSERT" ->
+					fields = change.data.record
 					assert Enum.sort(Map.keys(fields)) == expected_keys
 					assert change.key == [fields.id]
 					{_position, row} = Map.fetch!(rows, fields.id)
@@ -77,10 +78,11 @@ defmodule RoachFeed.Tests.Messages do
 					end
 
 				true ->
-					fields = change.data.after
+					assert change.data.type == "UPDATE"
+					fields = change.data.record
 					assert Enum.sort(Map.keys(fields)) == expected_keys
 					assert change.key == [fields.id]
-					assert Map.has_key?(change.data.before, :author)
+					refute Map.has_key?(change.data.old_record, :author)
 					{_position, row} = Map.fetch!(rows, fields.id)
 					if Map.has_key?(fields, :body) do
 						assert fields.body == "updated: " <> row["body"]

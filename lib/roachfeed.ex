@@ -146,6 +146,30 @@ defmodule RoachFeed do
 					true ->
 						schema = config[:schema] || "public"
 
+						context = case config[:table] do
+							nil ->
+								{:ok, nil}
+							table ->
+								case RoachFeed.fetch_primary_key(socket, schema, table) do
+									{:ok, primary_key} ->
+										pkey_names = Enum.map(primary_key, fn {name, _type} -> name end)
+										select_columns = case config[:columns] do
+											c when c in [nil, []] -> nil
+											c -> c ++ (pkey_names -- c)
+										end
+										case RoachFeed.fetch_column_types(socket, schema, table, select_columns) do
+											{:ok, column_types} -> {:ok, {pkey_names, select_columns, column_types}}
+											{:error, _} = err -> err
+										end
+									{:error, _} = err -> err
+								end
+						end
+
+						select_columns = case context do
+							{:ok, {_pkey_names, select_columns, _column_types}} -> select_columns
+							_ -> nil
+						end
+
 						with_opts = case config[:table] do
 							nil -> config[:with]
 							_ -> [envelope: "wrapped", resolved: config[:resolved] || "10s", cursor: config[:after], mvcc_timestamp: true, diff: true]
@@ -168,8 +192,8 @@ defmodule RoachFeed do
 								end
 							table ->
 								<<", ", w::binary>> = w
-								columns = case config[:columns] do
-									c when c in [nil, []] -> "*"
+								columns = case select_columns do
+									nil -> "*"
 									c -> Enum.join(c, ", ")
 								end
 								where = case config[:where] do
@@ -201,21 +225,23 @@ defmodule RoachFeed do
 							<<?S, 0, 0, 0, 4>>
 						]
 
-						column_types = case config[:table] do
-							nil -> {:ok, nil}
-							table -> RoachFeed.fetch_column_types(socket, schema, table, config[:columns])
-						end
-
-						with {:ok, column_types} <- column_types,
+						with {:ok, context} <- context,
 						     {?1, nil} <- RoachFeed.send_recv_message(socket, parse_describe_sync),
 						     {?t, _} <- RoachFeed.recv_message(socket), # parameter info
 						     {?T, _} <- RoachFeed.recv_message(socket), # column info
 						     {?Z, _} <- RoachFeed.recv_message(socket), # wait until server is ready
 						     :ok <- RoachFeed.sock_send(socket, bind_execute_close_sync)
 						do
-							if column_types != nil do
-								IO.puts("column types: " <> Enum.map_join(column_types, ", ", fn {name, type} -> "#{name}=#{type}" end))
-								Process.put(:column_types, column_types)
+							case context do
+								nil ->
+									:ok
+								{pkey_names, _select_columns, column_types} ->
+									IO.puts("column types: " <> Enum.map_join(column_types, ", ", fn {name, type} -> "#{name}=#{type}" end))
+									IO.puts("primary key: " <> Enum.join(pkey_names, ", "))
+									Process.put(:column_types, column_types)
+									Process.put(:primary_key, pkey_names)
+									Process.put(:schema, schema)
+									Process.put(:table, config[:table])
 							end
 							{:ok, state}
 						else
@@ -242,6 +268,11 @@ defmodule RoachFeed do
 				value = case rest == "" do
 					true -> nil # when envelope = 'key_only' is specified
 					false -> rest
+				end
+
+				value = case Process.get(:column_types) do
+					nil -> value
+					column_types -> RoachFeed.shape_change(value, column_types)
 				end
 
 				state = handle_change(table, key, value, state)
@@ -453,6 +484,79 @@ defmodule RoachFeed do
 			{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
 			invalid -> {:error, RoachFeed.Error.driver("unexpected reply to column type query", invalid)}
 		end
+	end
+
+	@doc false
+	def fetch_primary_key(socket, schema, table) do
+		sql = :erlang.iolist_to_binary([
+			"SELECT a.attname, t.typname FROM pg_index i",
+			" JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)",
+			" JOIN pg_type t ON a.atttypid = t.oid",
+			" JOIN pg_class c ON c.oid = i.indrelid",
+			" JOIN pg_namespace n ON c.relnamespace = n.oid",
+			" WHERE n.nspname = '", schema, "' AND c.relname = '", table, "' AND i.indisprimary",
+			" ORDER BY array_position(i.indkey, a.attnum)"
+		])
+
+		parse_describe_sync = [
+			build_message(?P, <<0, sql::binary, 0, 0, 0>>),
+			<<?D, 0, 0, 0, 6, ?S, 0>>,
+			<<?S, 0, 0, 0, 4>>
+		]
+
+		bind_execute_close_sync = [
+			[?B, 0, 0, 0, 14, 0, 0, 0, 0, <<0::big-16>>, [], 0, 1, 0, 1],
+			<<?E, 0, 0, 0, 9, 0, 0, 0, 0, 0>>,
+			<<?C, 0, 0, 0, 6, ?S, 0>>,
+			<<?S, 0, 0, 0, 4>>
+		]
+
+		with {?1, nil} <- send_recv_message(socket, parse_describe_sync),
+		     {?t, _} <- recv_message(socket), # parameter info
+		     {?T, _} <- recv_message(socket), # column info
+		     {?Z, _} <- recv_message(socket), # wait until server is ready
+		     :ok <- sock_send(socket, bind_execute_close_sync),
+		     {?2, nil} <- recv_message(socket)
+		do
+			recv_column_types(socket, [])
+		else
+			{:error, _} = err -> err
+			{?E, err} -> {:error, RoachFeed.Error.cockroach(err)}
+			invalid -> {:error, RoachFeed.Error.driver("unexpected reply to primary key query", invalid)}
+		end
+	end
+
+	@doc false
+	def shape_change(value, column_types) do
+		message = Jason.decode!(value)
+		mvcc_timestamp = message["mvcc_timestamp"]
+		names = Enum.map(column_types, fn {name, _type} -> name end)
+
+		payload = %{
+			schema: Process.get(:schema),
+			table: Process.get(:table),
+			columns: Enum.map(column_types, fn {name, type} -> %{name: name, type: type} end),
+			commit_timestamp: mvcc_to_commit_timestamp(mvcc_timestamp),
+			errors: nil,
+			mvcc_timestamp: mvcc_timestamp
+		}
+
+		payload = case {message["after"], message["before"]} do
+			{nil, before} -> payload |> Map.put(:type, "DELETE") |> Map.put(:old_record, Map.take(before, names))
+			{record, nil} -> payload |> Map.put(:type, "INSERT") |> Map.put(:record, record)
+			{record, before} -> payload |> Map.put(:type, "UPDATE") |> Map.put(:record, record) |> Map.put(:old_record, Map.take(before, names))
+		end
+
+		Jason.encode!(payload)
+	end
+
+	defp mvcc_to_commit_timestamp(mvcc_timestamp) do
+		[nanos, _logical] = :binary.split(mvcc_timestamp, ".")
+		nanos
+		|> String.to_integer()
+		|> DateTime.from_unix!(:nanosecond)
+		|> DateTime.truncate(:millisecond)
+		|> DateTime.to_iso8601()
 	end
 
 	defp recv_column_types(socket, acc) do

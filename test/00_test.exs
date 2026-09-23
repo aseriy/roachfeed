@@ -51,23 +51,28 @@ defmodule RoachFeed.Tests do
 		change = forwarded(:change)
 		assert change.key == ["9000!"]
 		assert change.table == "table_b"
-		assert change.data.after == %{id: "9000!", value: 2}
-		assert change.data.before == nil
+		assert change.data.type == "INSERT"
+		assert change.data.record == %{id: "9000!", value: 2}
+		assert change.data.schema == "public"
+		assert change.data.table == "table_b"
+		assert change.data.errors == nil
+		assert change.data.columns == [%{name: "id", type: "text"}, %{name: "value", type: "int8"}]
+		refute Map.has_key?(change.data, :old_record)
 
 		change = forwarded(:change)
 		assert change.key == ["over"]
 		assert change.table == "table_b"
 		ts2 = change.data.mvcc_timestamp
-		assert change.data.after == %{id: "over", value: 1}
-		assert change.data.before == nil
+		assert change.data.type == "INSERT"
+		assert change.data.record == %{id: "over", value: 1}
 
 		query!("INSERT INTO table_b (id, value) VALUES ($1, $2)", ["spice", 1])
 		change = forwarded(:change)
 		assert change.key == ["spice"]
 		assert change.table == "table_b"
 		ts3 = change.data.mvcc_timestamp
-		assert change.data.after == %{id: "spice", value: 1}
-		assert change.data.before == nil
+		assert change.data.type == "INSERT"
+		assert change.data.record == %{id: "spice", value: 1}
 
 		GenServer.stop(pid)
 
