@@ -145,19 +145,26 @@ defmodule RoachFeed do
 
 					true ->
 						schema = config[:schema] || "public"
+						# Names may arrive double-quoted; the statement takes them as given, the catalog
+						# lookups and the payload use the plain name.
+						plain_schema = RoachFeed.plain_ident(schema)
+						plain_table = RoachFeed.plain_ident(config[:table] || "")
 
 						context = case config[:table] do
 							nil ->
 								{:ok, nil}
-							table ->
-								case RoachFeed.fetch_primary_key(socket, schema, table) do
+							_table ->
+								case RoachFeed.fetch_primary_key(socket, plain_schema, plain_table) do
 									{:ok, primary_key} ->
 										pkey_names = Enum.map(primary_key, fn {name, _type} -> name end)
-										select_columns = case config[:columns] do
-											c when c in [nil, []] -> nil
-											c -> c ++ (pkey_names -- c)
+										{select_columns, plain_select_columns} = case config[:columns] do
+											c when c in [nil, []] -> {nil, nil}
+											c ->
+												plain = Enum.map(c, &RoachFeed.plain_ident/1)
+												missing = pkey_names -- plain
+												{c ++ Enum.map(missing, fn name -> "\"" <> name <> "\"" end), plain ++ missing}
 										end
-										case RoachFeed.fetch_column_types(socket, schema, table, select_columns) do
+										case RoachFeed.fetch_column_types(socket, plain_schema, plain_table, plain_select_columns) do
 											{:ok, column_types} -> {:ok, {pkey_names, select_columns, column_types}}
 											{:error, _} = err -> err
 										end
@@ -240,8 +247,8 @@ defmodule RoachFeed do
 									IO.puts("primary key: " <> Enum.join(pkey_names, ", "))
 									Process.put(:column_types, column_types)
 									Process.put(:primary_key, pkey_names)
-									Process.put(:schema, schema)
-									Process.put(:table, config[:table])
+									Process.put(:schema, plain_schema)
+									Process.put(:table, plain_table)
 							end
 							{:ok, state}
 						else
@@ -447,15 +454,29 @@ defmodule RoachFeed do
 		[type, <<(byte_size(payload)+5)::big-32>>, payload, 0]
 	end
 
+	# A double-quoted identifier without its quotes; anything else as given.
+	@doc false
+	def plain_ident(<<"\"", rest::binary>>) when byte_size(rest) > 0 do
+		case String.ends_with?(rest, "\"") do
+			true -> rest |> binary_part(0, byte_size(rest) - 1) |> String.replace("\"\"", "\"")
+			false -> "\"" <> rest
+		end
+	end
+	def plain_ident(name), do: name
+
+	# A value safe inside a single-quoted SQL literal.
+	@doc false
+	def literal(value), do: String.replace(value, "'", "''")
+
 	@doc false
 	def fetch_column_types(socket, schema, table, columns) do
 		filter = case columns do
 			c when c in [nil, []] -> ""
-			c -> [" AND column_name IN (", c |> Enum.map(fn column -> "'#{column}'" end) |> Enum.join(", "), ")"]
+			c -> [" AND column_name IN (", c |> Enum.map(fn column -> "'#{literal(column)}'" end) |> Enum.join(", "), ")"]
 		end
 		sql = :erlang.iolist_to_binary([
-			"SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = '", schema,
-			"' AND table_name = '", table, "'", filter, " ORDER BY ordinal_position"
+			"SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = '", literal(schema),
+			"' AND table_name = '", literal(table), "'", filter, " ORDER BY ordinal_position"
 		])
 
 		parse_describe_sync = [
@@ -494,7 +515,7 @@ defmodule RoachFeed do
 			" JOIN pg_type t ON a.atttypid = t.oid",
 			" JOIN pg_class c ON c.oid = i.indrelid",
 			" JOIN pg_namespace n ON c.relnamespace = n.oid",
-			" WHERE n.nspname = '", schema, "' AND c.relname = '", table, "' AND i.indisprimary",
+			" WHERE n.nspname = '", literal(schema), "' AND c.relname = '", literal(table), "' AND i.indisprimary",
 			" ORDER BY array_position(i.indkey, a.attnum)"
 		])
 

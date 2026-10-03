@@ -94,7 +94,9 @@ Semantics:
   message and the feed resumes strictly past it (CockroachDB's `cursor` option).
   When omitted, the feed does an initial scan of the table, then streams live changes.
 - `table`, `columns` and `where` are spliced into the SQL verbatim; the server
-  validates them.
+  validates them. `schema`, `table` and `columns` may be passed as double-quoted
+  identifiers; roachfeed uses the plain name for its catalog lookups and in the
+  payload's `schema` and `table`.
 
 The generated statement:
 
