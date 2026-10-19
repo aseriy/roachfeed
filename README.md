@@ -112,7 +112,9 @@ AS SELECT <columns|*> FROM <table>[ WHERE <predicate>]
   by a middlebox) leaves the consumer waiting forever. Needs a liveness
   mechanism - TCP keepalive on the socket and/or a watchdog on expected
   `resolved` watermarks.
+- Support for feeding RLS enabled tables. CRDB doesn't allow `CREATE CHANGEFEED` with `SELECT`.
 
 ## License
 
 [ISC](LICENSE) Copyright (c) 2020, Karl Seguin
+Copyright (c) 2026, Alex Seriy
